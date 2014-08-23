@@ -27,10 +27,11 @@
 
 __all__ = [ "SI470x" ]
 
+from ..i2c import I2C
+from .rds import RDS
+
 import RPi.GPIO as gpio 
 import time
-from ..i2c import I2C
-
 import array
 
 class SI470x:
@@ -49,7 +50,6 @@ class SI470x:
     WRAP  = 0
 
     __i2c = None
-
     __registers = None
     __properties = None
 
@@ -97,7 +97,6 @@ class SI470x:
         time.sleep(1)
 
         self.__registers.read() # read the current registers
-
         #self.__properties.get(0x0700)
 
         self.__registers.set("rds")
@@ -109,16 +108,31 @@ class SI470x:
         self.setChannel(self.__band_min[region & 0x0F], direct_update = False )
 
         self.__registers.write();
+
         if self.__debug == True: print(self.__registers)
+
 
     def __str__(self):
         s = self.status()
         if self.__debug == True: s += "\n" + self.__registers.__str__()
         return s
 
+
+    def __wait_stc(self, value, timeout = 1):
+        start = time.time()
+        timeouted = False
+
+        while(self.__registers.get("stc") != value and not timeouted):
+            timeouted = (time.time() - start > timeout)
+            self.__registers.read(end = "statusrssi")
+
+        return timeouted
+
+
     def __update_registers(self, direct_update = True, **kwargs):
         if direct_update == True:
             self.__registers.write()
+
 
     def status(self): 
         freq = self.getChannel()
@@ -141,9 +155,7 @@ class SI470x:
         self.__registers.read(end = "statusrssi")
         return self.__registers.get("rdsr") == 1
 
-    __rdbs_text = ['.','.','.','.','.','.','.','.']
-    __rdbs_id = ['.','.','.','.','.','.','.','.']
-
+    __rds = dict()
     def pollRDS(self):
         '''
         The RDS part is experimental and not yet finished Reference is
@@ -152,44 +164,37 @@ class SI470x:
         start = time.time();
         self.__registers.read(end = "rdsd")
 
-        rdbs = ""
+        ret = None
         if self.__registers.get("rdsr"):
             if self.__registers.get("blera") < 3:
                 pi = self.__registers.get("rdsa")
-                rdbs = "PI: {0:#x}".format(pi)
+
+                if not pi in self.__rds:
+                    self.__rds[pi] = RDS(pi, region = self.__rds_region)
+
                 if self.__registers.get("blerb") < 2:
                     rdsb = self.__registers.get("rdsb")
-                    group_type = rdsb >> 11
-                    pty = (rdsb >> 5) & 0xF
-                    b0 = (rdsb >> 9) & 0x1
-                    tp = (rdsb >> 10) & 0x1
-                    rdbs  += " - Group: {1} B0: {2} TP: {3} PTY:{4}".format(pi, group_type, b0, tp, pty)
-
                     rdsc = self.__registers.get("rdsc")
                     rdsd = self.__registers.get("rdsd")
-                    t = [ rdsc >> 8, rdsc & 0xFF, rdsd >> 8, rdsd & 0xFF ]
-                    if group_type == 4: # radio text
-                        pos = rdsb & 0x4
-                        for i in range(4):
-                            self.__rdbs_text[pos + i] = chr(t[i])
+                    chwc = self.__registers.get("blerc")
+                    chwd = self.__registers.get("blerd")
 
-                    if group_type == 0:
-                        c = (rdsb >> 0) & 3
-                        self.__rdbs_id[c    ] = chr(t[2])
-                        self.__rdbs_id[c + 1] = chr(t[3])
+                    self.__rds[pi].decode(rdsb, rdsc, chwc, rdsd, chwd)
 
-                    rdbs += " - rds_id: {0}".format(self.__rdbs_id)
-                    rdbs += " - text \"" + self.__rdbs_text.__str__() + "\""
-        if not rdbs == "":
-            print("\r"+rdbs),
-                    
+                if self.__debug: print(self.__rds[pi])
+
+                ret = self.__rds[pi]
+
         dur = 0.086 - (time.time() - start)
         if(dur > 0):
             time.sleep(dur)
+        return ret
+
 
     def rssi(self):
         self.__registers.read(end = "statusrssi")
         return self.__registers.get("rssi")
+
 
     def setSoftMute(self, mute = True, attenuation = 16, speed = "fastest", **kwargs):
         __softmute_speed = { "fastest": 0x0,
@@ -205,16 +210,6 @@ class SI470x:
         self.__registers.set("smutea", __softmute_attenuation[attenuation])
         self.__registers.set("smuter", __softmute_speed[speed])
         self.__update_registers(**kwargs)
-
-    def __wait_stc(self, value, timeout = 1):
-        start = time.time()
-        timeouted = False
-
-        while(self.__registers.get("stc") != value and not timeouted):
-            timeouted = (time.time() - start > timeout)
-            self.__registers.read(end = "statusrssi")
-
-        return timeouted
 
 
     def setChannel(self, frequence, tune = True, timeout = 0.5, **kwargs):
@@ -260,9 +255,15 @@ class SI470x:
         Return the current frequency
         '''
         self.__registers.read(end = "readchan")
-        return (self.__band_min[self.__region & 0x0F] +  self.__spacing[self.__region & 0xF0] * self.__registers.get("readchan"))
+        return (self.__band_min[self.__region & 0x0F] +
+                self.__spacing[self.__region & 0xF0] * self.__registers.get("readchan"))
 
-    def seek(self, direction = UP, mode = WRAP, timeout = 1, seek_rssi_threshold = 0x19, seek_snr_threshold = 0x4, seek_fm_counts = 0x8, **kwargs):
+
+    def seek(self, direction = UP, mode = WRAP, timeout = 1,
+             seek_rssi_threshold = 0x19,
+             seek_snr_threshold  = 0x4,
+             seek_fm_counts      = 0x8,
+             **kwargs):
         # the defaults values are the one recommanded in AN284
         self.__registers.set("seekth", seek_rssi_threshold)
         self.__registers.set("sksnr", seek_snr_threshold)
@@ -295,6 +296,12 @@ class SI470x:
         '''
 
         self.__region = region
+        if region == self.USA:
+            self.__rds_region = RDS.USA
+        elif region == self.EUROPE:
+            self.__rds_region = RDS.EUROPE
+        else:
+            self.__rds_region = RDS.UNKNOWN
 
         self.__registers.set("de"   , (region >> 8) & 0xF)
         self.__registers.set("space", (region >> 4) & 0xF)
@@ -433,8 +440,10 @@ class SI470x:
                                                       "C" if rev == 0x04 else "A/B",
                                                       firmware,
                                                       "off" if firmware == 0 else "on")
-            registers_str = "\n".join(["Registers:"] + [" - {0:<11}(0x{1:02X}) = 0x{2:04X}".format(self.__get_name(a+2), a+2, v)
-                                       for a, v in enumerate(self.__registers[2:])])
+            registers_str = "\n".join(["Registers:"] +
+                                      [" - {0:<11}(0x{1:02X}) = 0x{2:04X}".format(self.__get_name(a+2), a+2, v)
+                                       for a, v in enumerate(self.__registers[2:])]
+                                      )
 
             return "\n".join([dev_str, chip_str, registers_str])
 
