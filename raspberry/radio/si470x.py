@@ -33,6 +33,7 @@ from .rds import RDS
 import RPi.GPIO as gpio 
 import time
 import array
+import copy
 
 class SI470x:
     # De-Emphasis[3:0] Space[3:0] Band[3:0]
@@ -53,10 +54,14 @@ class SI470x:
     __registers = None
     __properties = None
 
+    __freq = 0
+
     # configuration values given in Mhz
     __spacing  = { 0x000: 0.2 , 0x010: 0.1, 0x020: 0.050  }
     __band_min = { 0x000: 87.5, 0x001: 76 , 0x002: 76 }
     __band_max = { 0x000: 108 , 0x001: 108, 0x002: 90 }
+
+    __rds_errors = ["0 errors", "1-2 errors", "3-5 errors", "6+ errors"]
 
     def __init__(self, address=0x10, rst_pin = 23,
                  region = EUROPE, volume = 16, debug=False):
@@ -136,7 +141,6 @@ class SI470x:
 
     def status(self): 
         freq = self.getChannel()
-        __rds_errors = ["0 errors", "1-2 errors", "3-5 errors", "6+ errors"]
         return ("Status:\n" + 
                 " - freq: {0}MHz\n" +
                 " - RDS status: {1} (Block A:{4} - B:{5} - C:{6} - C:{7})\n" +
@@ -145,10 +149,10 @@ class SI470x:
                                               "ready" if self.__registers.get("rdsr") == 1 else "none",
                                               "stereo" if self.__registers.get("st") == 1 else "mono",
                                               self.__registers.get("rssi"),
-                                              __rds_errors[self.__registers.get("blera")],
-                                              __rds_errors[self.__registers.get("blerb")],
-                                              __rds_errors[self.__registers.get("blerc")],
-                                              __rds_errors[self.__registers.get("blerd")])
+                                              self.__rds_errors[self.__registers.get("blera")],
+                                              self.__rds_errors[self.__registers.get("blerb")],
+                                              self.__rds_errors[self.__registers.get("blerc")],
+                                              self.__rds_errors[self.__registers.get("blerd")])
 
 
     def hasRDS(self):
@@ -164,36 +168,52 @@ class SI470x:
         start = time.time();
         self.__registers.read(end = "rdsd")
 
-        ret = None
+        
+        decoded = False
         if self.__registers.get("rdsr"):
-            if self.__registers.get("blera") < 3:
-                pi = self.__registers.get("rdsa")
+            rdsa = self.__registers.get("rdsa")
+            rdsb = self.__registers.get("rdsb")
+            rdsc = self.__registers.get("rdsc")
+            rdsd = self.__registers.get("rdsd")
+            chwa = self.__registers.get("blera")
+            chwb = self.__registers.get("blerb")
+            chwc = self.__registers.get("blerc")
+            chwd = self.__registers.get("blerd")
 
-                if not pi in self.__rds:
-                    self.__rds[pi] = RDS(pi, region = self.__rds_region)
+            if self.__freq in self.__rds:
+                tmp_rds = copy.deepcopy(self.__rds[self.__freq])
+            else:
+                tmp_rds = RDS(region = self.__rds_region)
+            decoded = tmp_rds.decode(rdsa, chwa,
+                                     rdsb, chwb,
+                                     rdsc, chwc,
+                                     rdsd, chwd)
+            if decoded:
+                self.__rds[self.__freq] = tmp_rds
 
-                if self.__registers.get("blerb") < 2:
-                    rdsb = self.__registers.get("rdsb")
-                    rdsc = self.__registers.get("rdsc")
-                    rdsd = self.__registers.get("rdsd")
-                    chwc = self.__registers.get("blerc")
-                    chwd = self.__registers.get("blerd")
-
-                    self.__rds[pi].decode(rdsb, rdsc, chwc, rdsd, chwd)
-
-                if self.__debug: print(self.__rds[pi])
-
-                ret = self.__rds[pi]
+                if self.__debug:
+                    print(self.__rds[self.__freq])
+            else:
+                if self.__debug:
+                    print(("RDS status:" +
+                           " A:{0} - B:{1} - C:{2} - C:{3}").format(self.__rds_errors[self.__registers.get("blera")],
+                                                                    self.__rds_errors[self.__registers.get("blerb")],
+                                                                    self.__rds_errors[self.__registers.get("blerc")],
+                                                                    self.__rds_errors[self.__registers.get("blerd")]))
 
         dur = 0.086 - (time.time() - start)
         if(dur > 0):
             time.sleep(dur)
-        return ret
+
+        if self.__freq in self.__rds:
+            return self.__rds[self.__freq]
+        else:
+            return None
 
 
-    def rssi(self):
+    def getRSSI(self):
         self.__registers.read(end = "statusrssi")
-        return self.__registers.get("rssi")
+        return int(self.__registers.get("rssi"))
 
 
     def setSoftMute(self, mute = True, attenuation = 16, speed = "fastest", **kwargs):
@@ -249,14 +269,22 @@ class SI470x:
         else:
             self.__update_registers(**kwargs)
 
+        self.__updateFreq()
 
     def getChannel(self, **kwargs):
         '''
         Return the current frequency
         '''
+        return self.__freq
+
+    def __updateFreq(self, **kwargs):
+        '''
+        Update the internal field that contain the frequence
+        '''
+        
         self.__registers.read(end = "readchan")
-        return (self.__band_min[self.__region & 0x0F] +
-                self.__spacing[self.__region & 0xF0] * self.__registers.get("readchan"))
+        self.__freq = float(self.__band_min[self.__region & 0x0F] +
+                     self.__spacing[self.__region & 0xF0] * self.__registers.get("readchan"))
 
 
     def seek(self, direction = UP, mode = WRAP, timeout = 1,
@@ -282,6 +310,8 @@ class SI470x:
         self.__registers.set("seek", 0)
         self.__registers.write(end = "powercfg")
         self.__wait_stc(0, timeout)
+
+        self.__updateFreq()
 
         if self.__debug == True:
             frequence = self.getChannel()

@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 # Copyright (c) 2014, netWorms 
 # All rights reserved.
@@ -46,12 +47,13 @@ class RDS:
 
     __seen_groups = Set()
 
+    __alternative_frequency = Set()
+
     UNKNOWN = 0
     EUROPE  = 1
     USA     = 2
 
-    def __init__(self, pi, region = UNKNOWN):
-        self.__pi = pi
+    def __init__(self, region = UNKNOWN):
         self.__region = region
 
     def __str__(self):
@@ -62,6 +64,7 @@ class RDS:
                                       " ({0})".format(self.__ptys[self.__region][self.__pty])) ]
         msg += [ " - reg: {0}".format("".join(self.__reg)) ]
         msg += [ " - text: {0}".format("".join(self.__radio_text)) ]
+        msg += [ " - alt freq: {0}".format(" ".join([ "{0:.1f}MHz".format(f) for f in sorted(self.__alternative_frequency) ])) ]
         msg += [ " - d3: {0}".format("static" if self.__static_pty else "not static") ]
         msg += [ " - d2: {0}".format("compressed" if self.__compressed else "uncompressed" ) ]
         msg += [ " - d0: {0}".format("stereo" if self.__stereo else "mono") ]
@@ -69,7 +72,21 @@ class RDS:
 
         return "\n".join(msg)
 
-    def decode(self, b, c, chwc, d, chwd):
+    def getProgramName(self):
+        return"".join(self.__reg)
+
+    def getRadioText(self):
+        return "".join(self.__radio_text)
+
+    def decode(self, a, chwa, b, chwb, c, chwc, d, chwd):
+        if chwa > 2:
+            return False
+
+        self.__pi = a
+
+        if chwb > 2:
+            return False
+
         self.__pty = (b >>  5) & 0xF
         self.__tp  = (b >> 10) & 0x1
 
@@ -79,30 +96,41 @@ class RDS:
         if chwd < 3:
             if b0 == 0: # Version A
                 if chwc < 3:
-                    self.__decodeBlock34(group_type, b & 0x1F, c, d)
+                    self.__decodeVersionA(group_type, b & 0x1F, c, d)
+                else: return False
             else: # Verison B
-                self.__decodeBlock4(group_type, b & 0x1F, d)
+                self.__decodeVersionB(group_type, b & 0x1F, d)
+        else: return False
 
         self.__seen_groups.add(group_type)
+        return True
 
-    def __decodeBlock4(self, group, b, d):
+    def __decodeVersionB(self, group, b, d):
         if group == 0:
-            self.__decode0(b, d)
+            self.__decode0B(b, d)
         if group == 2:
-            self.__decode2(b, [d >> 4, d & 0xF])
+            self.__decode2(b, [d >> 8, d & 0xFF])
 
-    def __decodeBlock34(self, group, b, c, d):
+    def __decodeVersionA(self, group, b, c, d):
         if group == 0:
-            self.__decode0(b, d)
+            self.__decode0A(b, c, d)
         if group == 2:
             self.__decode2(b, [c >> 8, c & 0xFF, d >> 8, d & 0xFF])
 
-    def __decode0(self, b, d):
+    def __decode0A(self, b, c, d):
+        fs = [c >> 8, c & 0xFF]
+        for f in fs:
+            if f > 0 and f < 204:
+                freq = 87.6 + (f-1) * 0.1
+                self.__alternative_frequency.add(freq)
+        self.__decode0B(b, d)
+
+    def __decode0B(self, b, d):
         di = (b >> 3) & 0x1
         c  = b & 0x3
         self.__decodeDI(di, c)
-        self.__reg[2*c    ] = chr((d >> 8) & 0xFF)
-        self.__reg[2*c + 1] = chr(d & 0xFF)
+        self.__reg[2*c    ] = self.__ascii_table[d >> 8  ]
+        self.__reg[2*c + 1] = self.__ascii_table[d & 0xFF]
 
     def __decode2(self, b, chars):
         c = b & 0xF
@@ -113,7 +141,7 @@ class RDS:
             self.__text_ab = t_ab
 
         for i, ch in enumerate(chars):
-            self.__radio_text[len(chars) * c + i] = chr(ch)
+            self.__radio_text[len(chars) * c + i] = self.__ascii_table[ch & 0xFF]
 
 
     def __decodeDI(self, di, c):
@@ -126,7 +154,8 @@ class RDS:
         else:        # d0
             self.__stereo = (di == 1)
 
-    __stations = { 0xF832: "La Radio Plus" }
+    __stations = { 0xF832: "La Radio Plus",
+                   0x4F20: "Rouge FM"}
 
     # Program types
     __ptys = { UNKNOWN: [""]*32,
@@ -145,3 +174,20 @@ class RDS:
                          "R_&_B"   , "Soft_R&B", "Language", "Rel_Musc",
                          "Rel_Talk", "Persnlty", "Public"  , "College" ,
                          ""        , "Weather" , "Test"    , "ALERT !" ] }
+
+    __ascii_table = [' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,
+                     ' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,' ' ,
+                     ' ' ,'!' ,'"' ,'#' ,'¤' ,'%' ,'&' ,'\'','(' ,')' ,'*' ,'+' ,',' ,'-' ,'.' ,'/' ,
+                     '0' ,'1' ,'2' ,'3' ,'4' ,'5' ,'6' ,'7' ,'8' ,'9' ,':' ,';' ,'<' ,'=' ,'>' ,'?' ,
+                     '@' ,'A' ,'B' ,'C' ,'D' ,'E' ,'F' ,'G' ,'H' ,'I' ,'J' ,'K' ,'L' ,'M' ,'N' ,'O' ,
+                     'P' ,'Q' ,'R' ,'S' ,'T' ,'U' ,'V' ,'W' ,'X' ,'Y' ,'Z' ,'[' ,'\\',']' ,'―' ,'_' ,
+                     'a' ,'b' ,'c' ,'d' ,'e' ,'f' ,'g' ,'h' ,'i' ,'j' ,'k' ,'l' ,'m' ,'n' ,'o' ,'p' ,
+                     'q' ,'r' ,'s' ,'t' ,'u' ,'1' ,'v' ,'w' ,'x' ,'y' ,'z' ,'{' ,'|' ,'}' ,'̄ ' ,' ' ,
+                     'á' ,'à' ,'é' ,'è' ,'í' ,'ì' ,'ó' ,'ò' ,'ú' ,'ù' ,'Ñ' ,'Ç' ,'Ş' ,'ß' ,'¡' ,'I' ,
+                     'â' ,'ä' ,'ê' ,'ë' ,'î' ,'ï' ,'ô' ,'ö' ,'û' ,'ü' ,'ñ' ,'ç' ,'ş' ,'ğ' ,'ı' ,'i' ,
+                     'a' ,'α' ,'©' ,'‰' ,'Ğ' ,'ĕ' ,'ň' ,'ő' ,'π' ,'€' ,'₤' ,'$' ,'←' ,'↑' ,'→' ,'↓' ,
+                     'o' ,'¹' ,'²' ,'³' ,'±' ,'İ' ,'ń' ,'ű' ,'μ' ,'¿' ,'÷' ,'o' ,'¼' ,'½' ,'¾' ,'§' ,
+                     'Á' ,'À' ,'É' ,'È' ,'Í' ,'Ì' ,'Ó' ,'Ò' ,'Ú' ,'Ù' ,'Ř' ,'Č' ,'Š' ,'Ž' ,'Ð' ,'L' ,
+                     'Â' ,'Ä' ,'Ê' ,'Ë' ,'Î' ,'Ï' ,'Ô' ,'Ö' ,'Û' ,'Ü' ,'ř' ,'č' ,'š' ,'ž' ,'đ' ,'l' ,
+                     'Ã' ,'Å' ,'Æ' ,'Œ' ,'ŷ' ,'Ý' ,'Õ' ,'Ø' ,'Þ' ,'Ŋ' ,'Ŕ' ,'Ć' ,'Ś' ,'Ź' ,'Ŧ' ,'ð' ,
+                     'ã' ,'å' ,'æ' ,'œ' ,'ŵ' ,'ý' ,'õ' ,'ø' ,'þ' ,'ŋ' ,'ŕ' ,'ć' ,'ś' ,'ź' ,'ŧ' ,' '  ]
